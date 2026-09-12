@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Graffiti Wall</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+ html,body{margin:0;height:100%;background:#faf6ee;overflow:hidden;font-family:system-ui,sans-serif}
+ canvas.layer{position:fixed;inset:0;width:100vw;height:100vh}
+ #timer{position:fixed;top:16px;right:24px;color:#6b5d54;font-size:42px;font-weight:600;
+        font-variant-numeric:tabular-nums;z-index:10}
+ #logo{position:fixed;bottom:64px;left:20px;z-index:10;background:#fff;border:1px solid #eee0d0;
+       border-radius:10px;padding:6px 12px;display:flex;align-items:center;gap:8px}
+ #logo img{height:44px;display:block}
+ #logo span{font-weight:700;font-size:20px;color:#333}
+ #qr{position:fixed;bottom:64px;right:20px;z-index:15;background:#fff;border-radius:12px;
+     padding:10px;display:none;flex-direction:column;align-items:center;gap:6px}
+ #qr .cap{font-size:13px;color:#333;font-weight:600}
+ #interlude{position:fixed;inset:0;background:#f6f3ec;display:none;align-items:center;
+            justify-content:center;flex-direction:column;z-index:20;opacity:0;transition:opacity 1s}
+ #interlude .big{font-size:64px;font-weight:700;color:#333}
+ #interlude .sub{font-size:20px;color:#777;margin-top:10px}
+ #dock{position:fixed;bottom:0;left:0;right:0;display:flex;gap:6px;justify-content:center;
+       padding:8px;z-index:10;flex-wrap:wrap}
+ #dock button{background:#fff;color:#6b5d54;border:1px solid #e2d9cc;border-radius:8px;
+              padding:7px 12px;font-size:13px;cursor:pointer}
+ #dock button.active{background:#f2b6c6;color:#5a3d47;border-color:#e79ab0}
+ #status{position:fixed;top:16px;left:24px;color:#a99;font-size:13px;z-index:10}
+</style>
+</head>
+<body>
+<canvas id="paint" class="layer"></canvas>
+<canvas id="guide" class="layer"></canvas>
+<canvas id="curs" class="layer"></canvas>
+<div id="timer">3:00</div>
+<div id="status">connecting…</div>
+<div id="logo"><img id="logoImg" src="logo.png" onerror="this.remove();document.getElementById('logoTxt').style.display='inline'"><span id="logoTxt" style="display:none">Little Blossoms</span></div>
+<div id="qr"><div class="cap">Scan to keep your art!</div><div id="qrbox"></div></div>
+<div id="interlude"><img src="logo.png" style="max-height:45vh;max-width:70vw" onerror="this.outerHTML='<div class=big>Little Blossoms</div>'"><div class="sub">next round starting…</div></div>
+<div id="dock"></div>
+<script>
+const PLAYERS=2, COLORS=['#e0475f','#2f7fd6','#2aa876','#e8a020'];
+const ROUND_S=180, INTERLUDE_S=15, QR_AT=150, BRUSH=26;
+const P=document.getElementById('paint'),G=document.getElementById('guide'),C=document.getElementById('curs');
+const p=P.getContext('2d'),g=G.getContext('2d'),c=C.getContext('2d');
+let W,H,shape='free',players={},last={},qrShown=false;
+
+/* ---------------- guide shapes: richer scenes ---------------- */
+function S(fn){g.strokeStyle='rgba(120,105,95,.55)';g.lineWidth=6;g.lineJoin='round';g.lineCap='round';fn();}
+function ln(a,b,x,y){g.beginPath();g.moveTo(a*W,b*H);g.lineTo(x*W,y*H);g.stroke();}
+function el(x,y,rx,ry){g.beginPath();g.ellipse(x*W,y*H,rx*W,ry*H,0,0,7);g.stroke();}
+function poly(pts,close){g.beginPath();g.moveTo(pts[0][0]*W,pts[0][1]*H);
+ for(let i=1;i<pts.length;i++)g.lineTo(pts[i][0]*W,pts[i][1]*H);if(close)g.closePath();g.stroke();}
+function rect(x,y,w,h){g.strokeRect(x*W,y*H,w*W,h*H);}
+function digit(d,x,y,s){g.font=`bold ${s*H}px system-ui`;g.strokeText(d,x*W,y*H);}
+
+const SHAPES={
+ free:{label:'Freehand',draw:()=>{}},
+ numerals:{label:'123 Numbers',draw:()=>S(()=>{digit('1',0.12,0.75,0.55);digit('2',0.40,0.75,0.55);digit('3',0.68,0.75,0.55);})},
+ rocket:{label:'Rocket launch',draw:()=>S(()=>{
+   poly([[0.42,0.55],[0.42,0.25],[0.5,0.08],[0.58,0.25],[0.58,0.55]],true);
+   el(0.5,0.3,0.03,0.03);
+   poly([[0.42,0.55],[0.34,0.68],[0.42,0.64]],true);poly([[0.58,0.55],[0.66,0.68],[0.58,0.64]],true);
+   poly([[0.45,0.64],[0.5,0.8],[0.55,0.64]],true);
+   el(0.18,0.2,0.05,0.05);for(let i=0;i<8;i++){const a=i/8*6.28;
+     ln(0.18+Math.cos(a)*0.06,0.2+Math.sin(a)*0.08,0.18+Math.cos(a)*0.09,0.2+Math.sin(a)*0.12);}
+   el(0.8,0.15,0.06,0.04);el(0.85,0.17,0.06,0.04);el(0.75,0.17,0.05,0.035);})},
+ butterfly:{label:'Butterfly',draw:()=>S(()=>{
+   el(0.5,0.5,0.02,0.14);el(0.5,0.33,0.025,0.03);
+   ln(0.49,0.31,0.44,0.22);ln(0.51,0.31,0.56,0.22);
+   el(0.36,0.4,0.12,0.13);el(0.64,0.4,0.12,0.13);
+   el(0.38,0.62,0.1,0.11);el(0.62,0.62,0.1,0.11);
+   el(0.36,0.4,0.05,0.05);el(0.64,0.4,0.05,0.05);})},
+ castle:{label:'Castle',draw:()=>S(()=>{
+   rect(0.3,0.45,0.4,0.4);rect(0.18,0.35,0.12,0.5);rect(0.7,0.35,0.12,0.5);
+   poly([[0.18,0.35],[0.24,0.2],[0.3,0.35]],true);poly([[0.7,0.35],[0.76,0.2],[0.82,0.35]],true);
+   ln(0.24,0.2,0.24,0.12);ln(0.24,0.12,0.3,0.14);ln(0.3,0.14,0.24,0.17);
+   rect(0.45,0.65,0.1,0.2);el(0.5,0.65,0.05,0.04);
+   rect(0.35,0.52,0.05,0.07);rect(0.6,0.52,0.05,0.07);
+   for(let i=0;i<5;i++)rect(0.3+i*0.08,0.42,0.04,0.03);})},
+ ocean:{label:'Ocean fish',draw:()=>S(()=>{
+   el(0.35,0.4,0.13,0.08);poly([[0.48,0.4],[0.58,0.32],[0.58,0.48]],true);
+   el(0.28,0.38,0.015,0.015);
+   el(0.7,0.62,0.09,0.055);poly([[0.79,0.62],[0.86,0.57],[0.86,0.67]],true);
+   for(let i=0;i<3;i++)el(0.15+i*0.02,0.25-i*0.06,0.012,0.012);
+   g.beginPath();g.moveTo(0.05*W,0.85*H);
+   for(let x=0;x<=1;x+=0.1)g.quadraticCurveTo((x+0.05)*W,0.82*H,(x+0.1)*W,0.85*H);g.stroke();})},
+ balloons:{label:'Balloons ×2',draw:()=>S(()=>{for(let i=0;i<PLAYERS;i++){
+   const x=0.3+0.4*i;el(x,0.35,0.09,0.13);ln(x,0.48,x,0.8);
+   poly([[x-0.015,0.48],[x+0.015,0.48],[x,0.5]],true);}})},
+};
+
+/* ---------------- layout ---------------- */
+function resize(){W=innerWidth;H=innerHeight;[P,G,C].forEach(cv=>{cv.width=W;cv.height=H});drawGuide();}
+addEventListener('resize',resize);
+function drawGuide(){g.clearRect(0,0,W,H);SHAPES[shape].draw();}
+const dock=document.getElementById('dock');
+for(const k in SHAPES){const b=document.createElement('button');b.textContent=SHAPES[k].label;
+ b.className=k==='free'?'active':'';b.onclick=()=>{shape=k;
+  [...dock.children].forEach(x=>x.classList.remove('active'));b.classList.add('active');drawGuide();};
+ dock.appendChild(b);}
+const rb=document.createElement('button');rb.textContent='Reset (R)';rb.onclick=()=>resetRound();dock.appendChild(rb);
+
+/* ---------------- painting ---------------- */
+function spray(pl,x,y){const px=x*W,py=y*H,prev=last[pl];
+ p.strokeStyle=COLORS[pl%4];p.lineWidth=BRUSH;p.lineCap='round';p.beginPath();
+ p.moveTo(prev?prev[0]:px,prev?prev[1]:py);p.lineTo(px,py);p.stroke();last[pl]=[px,py];}
+(function cursors(){c.clearRect(0,0,W,H);
+ for(const k in players){const s=players[k];if(!s.visible)continue;
+  c.beginPath();c.arc(s.x*W,s.y*H,14,0,7);c.strokeStyle=COLORS[k%4];c.lineWidth=s.b?6:3;c.stroke();}
+ requestAnimationFrame(cursors);})();
+
+/* ---------------- souvenir QR ---------------- */
+async function makeQR(){
+ const flat=document.createElement('canvas');flat.width=W;flat.height=H;
+ const f=flat.getContext('2d');f.fillStyle='#faf6ee';f.fillRect(0,0,W,H);
+ f.drawImage(G,0,0);f.drawImage(P,0,0);
+ const li=document.getElementById('logoImg');
+ if(li&&li.complete&&li.naturalWidth){const h=60,w=h*li.naturalWidth/li.naturalHeight;
+  f.fillStyle='#fff';f.fillRect(14,H-h-14-8,w+16,h+16);f.strokeStyle='#e2d9cc';f.strokeRect(14,H-h-14-8,w+16,h+16);f.drawImage(li,22,H-h-14,w,h);}
+ try{
+  const r=await fetch('http://localhost:8766/save',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({png:flat.toDataURL('image/png')})});
+  const {url}=await r.json();
+  document.getElementById('qrbox').innerHTML='';
+  new QRCode(document.getElementById('qrbox'),{text:url,width:140,height:140});
+  document.getElementById('qr').style.display='flex';
+ }catch(e){console.warn('snapshot failed',e);}
+}
+
+/* ---------------- rounds ---------------- */
+let tLeft=ROUND_S,inInter=false;
+const timerEl=document.getElementById('timer'),inter=document.getElementById('interlude');
+function resetRound(){p.clearRect(0,0,W,H);tLeft=ROUND_S;inInter=false;qrShown=false;
+ document.getElementById('qr').style.display='none';
+ inter.style.opacity=0;setTimeout(()=>inter.style.display='none',1000);last={};}
+setInterval(()=>{
+ if(inInter){if(--tLeft<=0)resetRound();return;}
+ tLeft--;timerEl.textContent=`${Math.floor(Math.max(tLeft,0)/60)}:${String(Math.max(tLeft,0)%60).padStart(2,'0')}`;
+ if(!qrShown&&tLeft<=ROUND_S-QR_AT){qrShown=true;makeQR();}
+ if(tLeft<=0){inInter=true;tLeft=INTERLUDE_S;inter.style.display='flex';
+  requestAnimationFrame(()=>inter.style.opacity=1);}
+},1000);
+addEventListener('keydown',e=>{if(e.key==='r'||e.key==='R')resetRound();});
+
+/* ---------------- inputs ---------------- */
+const status=document.getElementById('status');
+(function connect(){const ws=new WebSocket('ws://localhost:8765');
+ ws.onopen=()=>status.textContent='backend connected';
+ ws.onclose=()=>{status.textContent='backend offline — mouse mode (keys 1-'+PLAYERS+', drag)';
+  setTimeout(connect,2000);};
+ ws.onmessage=ev=>{for(const cur of JSON.parse(ev.data).cursors){
+   if(cur.player>=PLAYERS)continue;players[cur.player]=cur;
+   if(cur.b&&cur.visible&&!inInter)spray(cur.player,cur.x,cur.y);else delete last[cur.player];}};})();
+let mP=0,mD=false;
+addEventListener('keydown',e=>{const n=+e.key;if(n>=1&&n<=PLAYERS)mP=n-1;});
+addEventListener('mousedown',()=>mD=true);
+addEventListener('mouseup',()=>{mD=false;delete last[mP];});
+addEventListener('mousemove',e=>{const x=e.clientX/W,y=e.clientY/H;
+ players[mP]={player:mP,x,y,visible:true,b:mD};if(mD&&!inInter)spray(mP,x,y);});
+resize();
+</script>
+</body>
+</html>
