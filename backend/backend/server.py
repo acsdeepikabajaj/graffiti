@@ -30,49 +30,6 @@ def lan_ip():
 
 LAN = lan_ip()
 
-def upload_public(png_bytes, name):
-    """Upload artwork to a public image host so ANY phone (cellular included)
-    can open the QR link. Order: imgbb (if IMGBB_KEY env set) -> catbox.moe.
-    Returns a public URL or None (caller falls back to LAN URL)."""
-    import urllib.request, urllib.parse, uuid
-    key = os.environ.get("IMGBB_KEY")
-    if key:
-        try:
-            payload = urllib.parse.urlencode({
-                "key": key,
-                "image": base64.b64encode(png_bytes).decode(),
-                "name": name,
-            }).encode()
-            req = urllib.request.Request("https://api.imgbb.com/1/upload", data=payload)
-            with urllib.request.urlopen(req, timeout=12) as r:
-                j = json.loads(r.read())
-                u = j.get("data", {}).get("url")
-                if u:
-                    return u
-        except Exception as e:
-            print("imgbb upload failed:", e)
-    try:
-        boundary = uuid.uuid4().hex
-        parts = []
-        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; "
-                     f"name=\"reqtype\"\r\n\r\nfileupload\r\n".encode())
-        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; "
-                     f"name=\"fileToUpload\"; filename=\"{name}\"\r\n"
-                     f"Content-Type: image/png\r\n\r\n".encode())
-        parts.append(png_bytes)
-        parts.append(f"\r\n--{boundary}--\r\n".encode())
-        body = b"".join(parts)
-        req = urllib.request.Request(
-            "https://catbox.moe/user/api.php", data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            u = r.read().decode().strip()
-            if u.startswith("http"):
-                return u
-    except Exception as e:
-        print("catbox upload failed:", e)
-    return None
-
 
 class Art(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -100,9 +57,8 @@ class Art(BaseHTTPRequestHandler):
         name = f"art_{int(time.time())}.png"
         with open(os.path.join(ART_DIR, name), "wb") as f:
             f.write(png)
-        pub = upload_public(png, name)
-        url = pub or f"http://{LAN}:{HTTP_PORT}/art/{name}"
-        body = json.dumps({"url": url, "public": bool(pub)}).encode()
+        url = f"http://{LAN}:{HTTP_PORT}/art/{name}"
+        body = json.dumps({"url": url}).encode()
         self.send_response(200); self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

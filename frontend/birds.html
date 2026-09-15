@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bird Blast — Little Blossoms</title>
+<style>
+ html,body{margin:0;height:100%;background:#eef6ff;overflow:hidden;font-family:system-ui,sans-serif;
+           -webkit-user-select:none;user-select:none}
+ canvas.layer{position:fixed;inset:0;width:100vw;height:100vh}
+ #hud{position:fixed;top:12px;left:0;right:0;display:flex;justify-content:center;gap:14px;z-index:10}
+ .score{background:#fff;border:2px solid #e2d9cc;border-radius:14px;padding:6px 18px;
+        font-size:26px;font-weight:800;color:#6b5d54;min-width:110px;text-align:center}
+ .score small{display:block;font-size:12px;font-weight:600;color:#a89a8c}
+ #timer{position:fixed;top:16px;right:24px;color:#6b5d54;font-size:42px;font-weight:600;
+        font-variant-numeric:tabular-nums;z-index:10}
+ #status{position:fixed;top:16px;left:24px;color:#a99;font-size:13px;z-index:10}
+ #overlay{position:fixed;inset:0;background:#eef6ffee;display:flex;align-items:center;
+          justify-content:center;flex-direction:column;z-index:20;gap:14px;text-align:center}
+ #overlay img{max-height:22vh}
+ #overlay .msg{font-size:34px;color:#6b5d54;font-weight:800}
+ #overlay .sub{font-size:17px;color:#a89a8c}
+ #overlay .ranks{display:flex;gap:14px}
+ #overlay .rank{background:#fff;border:2px solid #e2d9cc;border-radius:14px;padding:12px 22px;
+        font-size:22px;font-weight:800;color:#6b5d54}
+ #overlay .rank small{display:block;font-size:13px;color:#a89a8c;font-weight:600}
+ #dock{position:fixed;bottom:0;left:0;right:0;display:flex;gap:6px;justify-content:center;
+       padding:8px;z-index:30}
+ #dock button{background:#fff;color:#6b5d54;border:1px solid #e2d9cc;border-radius:8px;
+              padding:7px 12px;font-size:13px;cursor:pointer}
+ #dock button.primary{background:#7fc79b;color:#274a35;border-color:#5cae7f;font-weight:700}
+ #dock button.danger{background:#f3d6a0;color:#6a4d1c;border-color:#e0b96a}
+ #curs{z-index:45;pointer-events:none}
+ .how{display:flex;flex-direction:column;gap:8px;background:#fff;border:2px solid #e2d9cc;
+      border-radius:16px;padding:16px 26px;font-size:20px;color:#6b5d54;text-align:left;font-weight:600}
+ .how b{color:#e0475f}
+ #tip{position:fixed;bottom:52px;left:0;right:0;text-align:center;color:#b3a596;
+      font-size:17px;font-weight:700;z-index:9;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="game" class="layer"></canvas>
+<canvas id="curs" class="layer"></canvas>
+<div id="hud"></div>
+<div id="tip">ring lit up? pull B!</div>
+<div id="timer">1:15</div>
+<div id="dlabel" style="position:fixed;top:64px;right:24px;color:#a89a8c;font-size:16px;font-weight:700;z-index:10">Medium</div>
+<div id="status">connecting…</div>
+<div id="overlay">
+  <img src="logo.png" alt="">
+  <div class="msg">Bird Blast</div>
+  <div class="how">
+    <div>&#127919; Your crosshair matches your remote's color (P1, P2&hellip;)</div>
+    <div>&#128038; Move it over a bird &mdash; the ring <b>lights up</b> when you can hit</div>
+    <div>&#128165; Pull <b>B</b> to shoot! Small speedy birds score more &middot; golden = 50</div>
+  </div>
+  <div class="ranks" id="ranks"></div>
+  <div class="sub" id="okey">hold <b>B</b> steady to start &middot; (S key works too &middot; H = menu)</div>
+</div>
+<div id="dock">
+  <button class="primary" onclick="startGame()">&#9654; Start (S)</button>
+  <span id="diffbtns"></span>
+  <button id="zbtn" onclick="toggleZones()">Own sky: ON</button>
+  <button id="mbtn" onclick="toggleMute()">&#128266;</button>
+  <button class="danger" onclick="endGame()">&#9632; End (E)</button>
+  <button onclick="GG.goHome()">&#8962; Menu (H)</button>
+</div>
+<script src="common.js"></script>
+<script>
+const {PALETTE,connect,state,playersFromURL,diffFromURL,goHome,audio}=GG;
+const N=playersFromURL(2);
+const ROUND_S=75, COOLDOWN=250;
+/* ---------- difficulty ----------
+   spd : bird speed multiplier      size: bird size multiplier
+   pad : extra hit radius (aim forgiveness)
+   flock0: birds on screen at start  ramp: seconds per extra bird */
+const DIFFS={
+ easy:{label:'Easy', spd:0.55,size:1.35,pad:26,flock0:3,ramp:26},
+ med: {label:'Medium',spd:1.00,size:1.00,pad:20,flock0:3,ramp:18},
+ hard:{label:'Hard', spd:1.55,size:0.82,pad:7, flock0:4,ramp:12}};
+let diff=diffFromURL('med'), D=DIFFS[diff];
+function setDiff(d){diff=d;D=DIFFS[d];updateDock();
+ document.getElementById('dlabel').textContent=N+'P \u00b7 '+D.label;}
+
+const cv=document.getElementById('game'),g=cv.getContext('2d');
+const cc=document.getElementById('curs'),c=cc.getContext('2d');
+let W,H;
+function fit(){W=innerWidth;H=innerHeight;
+ for(const [el,ctx] of [[cv,g],[cc,c]]){el.width=W*devicePixelRatio;el.height=H*devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);}}
+addEventListener('resize',fit);fit();
+
+/* ---------- game state ---------- */
+let running=false,counting=false,tLeft=ROUND_S,timerIv=null;
+let zonesOn=true;
+const useZones=()=>zonesOn&&N>1;
+const bandH=()=>H/N;
+function bandTop(i){return i*bandH();}
+const scores=Array(N).fill(0), lastShot=Array(N).fill(0);
+const birds=[],parts=[],pops=[],flashes=[];
+
+/* bird kinds: r radius, v speed, pts, chance */
+const KINDS=[
+ {r:34,v:1.6,pts:10,col:'#2f7fd6',ch:.38},
+ {r:26,v:2.6,pts:20,col:'#2aa876',ch:.34},
+ {r:19,v:3.8,pts:30,col:'#e0475f',ch:.20},
+ {r:24,v:3.2,pts:50,col:'#e8a020',ch:.08,gold:true}];
+function pickKind(){let x=Math.random(),a=0;
+ for(const k of KINDS){a+=k.ch;if(x<=a)return k;}return KINDS[0];}
+
+function spawn(z){const k0=pickKind(),dir=Math.random()<.5?1:-1;
+ const k={...k0,r:k0.r*D.size,v:k0.v*D.spd};
+ let y0,amp;
+ if(useZones()){const bh=bandH(),pad=Math.min(46,bh*0.22);
+  y0=bandTop(z)+pad+Math.random()*(bh-2*pad);amp=Math.min(bh*0.14,22);}
+ else{y0=H*0.12+Math.random()*H*0.6;amp=26;z=-1;}
+ birds.push({...k,x:dir>0?-k.r-10:W+k.r+10,dir,
+  y:y0,baseY:y0,amp,z,ph:Math.random()*7,born:Date.now()});}
+
+/* ---------- shooting ---------- */
+function canHit(b,px,py){
+ // birds are wide: elliptical hitbox 1.5x wider than tall, plus difficulty pad
+ const rx=b.r*1.5+D.pad, ry=b.r+D.pad;
+ const dx=(b.x-px)/rx, dy=(b.y-py)/ry;
+ return dx*dx+dy*dy<1;}
+function shoot(pl,x,y){
+ if(!running)return;
+ const now=Date.now();if(now-lastShot[pl]<COOLDOWN)return;
+ lastShot[pl]=now;
+ const px=x*W,py=y*H;
+ flashes.push({x:px,y:py,t:now,col:PALETTE[pl%4]});
+ audio.noise(.05,.05,0,2000);
+ let best=-1,bd=1e9;
+ for(let i=0;i<birds.length;i++){const b=birds[i];
+  if(useZones()&&b.z!==pl)continue;
+  if(!canHit(b,px,py))continue;
+  const d=Math.hypot(b.x-px,b.y-py);
+  if(d<bd){bd=d;best=i;}}
+ if(best>=0){const b=birds[best];birds.splice(best,1);
+  scores[pl]+=b.pts;updateHUD();
+  for(let i=0;i<14;i++)parts.push({x:b.x,y:b.y,vx:(Math.random()-.5)*7,
+   vy:-Math.random()*5,l:40,col:b.gold?'#e8a020':b.col});
+  pops.push({x:b.x,y:b.y,txt:'+'+b.pts,t:Date.now(),col:PALETTE[pl%4],gold:b.gold});
+  if(b.gold)[660,880,1100].forEach((f,i)=>audio.tone(f,.12,'triangle',.16,i*.07));
+  else{audio.tone(620,.09,'triangle',.14);audio.tone(830,.1,'triangle',.12,.06);}}}
+function beep(f){try{const a=beep.ctx||(beep.ctx=new AudioContext());
+ const o=a.createOscillator(),gn=a.createGain();
+ o.frequency.value=f;o.type='triangle';gn.gain.setValueAtTime(.12,a.currentTime);
+ gn.gain.exponentialRampToValueAtTime(.001,a.currentTime+.18);
+ o.connect(gn).connect(a.destination);o.start();o.stop(a.currentTime+.2);}catch(e){}}
+
+/* ---------- HUD ---------- */
+const hud=document.getElementById('hud');
+function updateHUD(){hud.innerHTML='';
+ for(let i=0;i<N;i++){const d=document.createElement('div');d.className='score';
+  d.style.borderColor=PALETTE[i%4];d.style.color=PALETTE[i%4];
+  d.innerHTML='<small>P'+(i+1)+'</small>'+scores[i];hud.appendChild(d);}}
+updateHUD();
+
+/* ---------- rounds ---------- */
+const overlay=document.getElementById('overlay'),ranks=document.getElementById('ranks'),
+      timerEl=document.getElementById('timer'),okey=document.getElementById('okey');
+function fmt(t){return Math.floor(Math.max(t,0)/60)+':'+String(Math.max(t,0)%60).padStart(2,'0');}
+const countEl=document.createElement('div');
+countEl.style.cssText='position:fixed;inset:0;display:none;align-items:center;justify-content:center;'+
+ 'font:900 18vh system-ui;color:#6b5d54;z-index:22;pointer-events:none';
+document.body.appendChild(countEl);
+function startGame(){if(running||counting)return;
+ counting=true;scores.fill(0);updateHUD();
+ birds.length=0;parts.length=0;pops.length=0;
+ overlay.style.display='none';tLeft=ROUND_S;timerEl.textContent=fmt(tLeft);
+ let n=3;countEl.style.display='flex';countEl.textContent=n;audio.tick(false);
+ const cd=setInterval(()=>{n--;
+  if(n>0){countEl.textContent=n;audio.tick(false);}
+  else{clearInterval(cd);countEl.textContent='GO!';audio.tick(true);audio.jingle();
+   audio.music('birds');
+   setTimeout(()=>countEl.style.display='none',600);
+   counting=false;running=true;
+   clearInterval(timerIv);
+   timerIv=setInterval(()=>{tLeft--;timerEl.textContent=fmt(tLeft);
+    if(tLeft<=0)endGame();},1000);}},550);}
+function endGame(){if(!running&&overlay.style.display!=='none')return;
+ running=false;clearInterval(timerIv);
+ audio.stopMusic();audio.fanfare();
+ const order=[...Array(N).keys()].sort((a,b)=>scores[b]-scores[a]);
+ ranks.innerHTML='';const medals=['\uD83E\uDD47','\uD83E\uDD48','\uD83E\uDD49',''];
+ order.forEach((p,i)=>{const d=document.createElement('div');d.className='rank';
+  d.style.borderColor=PALETTE[p%4];
+  d.innerHTML='<small>'+(medals[i]||'')+' P'+(p+1)+'</small>'+scores[p]+' pts';
+  ranks.appendChild(d);});
+ document.querySelector('#overlay .msg').textContent='Round over!';
+ okey.innerHTML='hold <b>B</b> to play again \u00b7 H = menu';
+ overlay.style.display='flex';}
+function updateDock(){const box=document.getElementById('diffbtns');box.innerHTML='';
+ for(const d in DIFFS){const b=document.createElement('button');
+  b.textContent=DIFFS[d].label;
+  if(d===diff){b.style.background='#f2b6c6';b.style.borderColor='#e79ab0';b.style.color='#5a3d47';}
+  b.onclick=()=>setDiff(d);box.appendChild(b);}}
+updateDock();setDiff(diff);
+function toggleZones(){zonesOn=!zonesOn;
+ document.getElementById('zbtn').textContent='Own sky: '+(zonesOn?'ON':'OFF');}
+function toggleMute(){audio.setMuted(!audio.muted);
+ document.getElementById('mbtn').innerHTML=audio.muted?'&#128263;':'&#128266;';}
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();
+ if(k==='m')toggleMute();
+ else if(k==='g'){const ks=Object.keys(DIFFS);setDiff(ks[(ks.indexOf(diff)+1)%ks.length]);}
+ else if(k==='s')startGame();
+ else if(k==='e')endGame();
+ else if(k==='r'){running=false;clearInterval(timerIv);location.reload();}
+ else if(k==='h')goHome();});
+
+/* ---------- input ---------- */
+const bhold={};
+function pressAt(pl,x,y){
+ const px=x*innerWidth,py=y*innerHeight;
+ const el=document.elementFromPoint(px,py);
+ if(el&&el.tagName==='BUTTON'){bhold[pl]={t0:Date.now(),el,kind:'btn'};return true;}
+ if(overlay.style.display!=='none'){bhold[pl]={t0:Date.now(),kind:'start'};return true;}
+ return false;}
+connect({players:N,smooth:false,status:document.getElementById('status'),
+ onB:(pl,x,y)=>{if(!pressAt(pl,x,y)){shoot(pl,x,y);}},
+ onBUp:pl=>{delete bhold[pl];},
+ onHome:()=>goHome()});
+
+/* ---------- render ---------- */
+function drawBird(b,t){const flap=Math.sin(t*.02+b.ph*4)*.9;
+ g.save();g.translate(b.x,b.y);g.scale(b.dir,1);
+ const s=b.r/22;g.scale(s,s);
+ if(b.gold){g.shadowColor='#e8a020';g.shadowBlur=18;}
+ g.fillStyle=b.col;
+ g.beginPath();g.ellipse(0,0,20,12,0,0,7);g.fill();
+ g.beginPath();g.arc(18,-6,9,0,7);g.fill();
+ g.shadowBlur=0;
+ g.fillStyle='#fff';g.beginPath();g.ellipse(-2,2,10,6,0,0,7);g.fill();  // belly
+ g.fillStyle='#e0475f';g.beginPath();
+ g.moveTo(26,-8);g.lineTo(36,-6);g.lineTo(26,-2);g.fill();               // beak
+ g.fillStyle='#3d3833';g.beginPath();g.arc(20,-8,2,0,7);g.fill();        // eye
+ g.strokeStyle=b.col;g.lineWidth=6;g.lineCap='round';                     // wings
+ g.beginPath();g.moveTo(-4,-4);g.quadraticCurveTo(-16,-4-22*flap,-30,-8-30*flap);g.stroke();
+ g.beginPath();g.moveTo(-4,4);g.quadraticCurveTo(-16,4+15*flap,-28,6+20*flap);g.stroke();
+ g.restore();}
+
+let last=0;
+function loop(t){
+ g.clearRect(0,0,W,H);
+ // sky + clouds
+ g.fillStyle='#eef6ff';g.fillRect(0,0,W,H);
+ g.fillStyle='#ffffff';
+ for(const [fx,fy,r] of [[.15,.18,46],[.5,.1,60],[.82,.22,52],[.33,.32,38]]){
+  const x=fx*W+Math.sin(t/9000+fx*9)*24,y=fy*H;
+  g.beginPath();g.arc(x,y,r,0,7);g.arc(x+r*.9,y+8,r*.75,0,7);g.arc(x-r*.9,y+8,r*.7,0,7);g.fill();}
+ // grass strip
+ g.fillStyle='#dff0dc';g.fillRect(0,H-46,W,46);
+ if(useZones()){g.setLineDash([10,12]);g.lineWidth=2;
+  for(let i=1;i<N;i++){g.strokeStyle='rgba(110,100,90,.3)';
+   g.beginPath();g.moveTo(0,bandTop(i));g.lineTo(W,bandTop(i));g.stroke();}
+  g.setLineDash([]);
+  g.font='800 20px system-ui';g.textAlign='left';
+  for(let i=0;i<N;i++){g.fillStyle=PALETTE[i%4];
+   g.fillText('P'+(i+1)+' sky',14,bandTop(i)+30);}}
+
+ if(running){
+  if(useZones()){
+   const perZone=Math.max(2,Math.ceil((D.flock0+Math.floor((ROUND_S-tLeft)/D.ramp))/1.4));
+   for(let z=0;z<N;z++){const cnt=birds.filter(b=>b.z===z).length;
+    if(cnt<perZone&&Math.random()<.05)spawn(z);}}
+  else{
+   const target=D.flock0+Math.floor((ROUND_S-tLeft)/D.ramp);
+   if(birds.length<target&&Math.random()<.05)spawn(Math.floor(Math.random()*N));}
+  for(let i=birds.length-1;i>=0;i--){const b=birds[i];
+   b.x+=b.v*b.dir*(1+ (ROUND_S-tLeft)/ROUND_S*.5);
+   b.y=b.baseY+Math.sin(t/300+b.ph)*b.amp;
+   if(b.x<-80||b.x>W+80)birds.splice(i,1);}}
+ for(const b of birds)drawBird(b,t);
+
+ // particles
+ for(let i=parts.length-1;i>=0;i--){const p2=parts[i];
+  p2.x+=p2.vx;p2.y+=p2.vy;p2.vy+=.18;p2.l--;
+  g.globalAlpha=Math.max(0,p2.l/40);g.fillStyle=p2.col;
+  g.beginPath();g.ellipse(p2.x,p2.y,6,2.4,p2.vx,0,7);g.fill();g.globalAlpha=1;
+  if(p2.l<=0)parts.splice(i,1);}
+ // score popups
+ const now=Date.now();
+ for(let i=pops.length-1;i>=0;i--){const p2=pops[i];const a=(now-p2.t)/900;
+  if(a>=1){pops.splice(i,1);continue;}
+  g.globalAlpha=1-a;g.fillStyle=p2.col;
+  g.font=(p2.gold?'900 44px':'800 32px')+' system-ui';g.textAlign='center';
+  g.fillText(p2.txt,p2.x,p2.y-40*a);g.globalAlpha=1;}
+
+ // cursors: crosshairs
+ c.clearRect(0,0,W,H);
+ for(const k in state){const s=state[k];if(!s||!s.visible)continue;
+  const X=s.x*W,Y=s.y*H,col=PALETTE[k%4];
+  let lock=false;                                   // would a press hit right now?
+  for(const b of birds){if(useZones()&&b.z!==+k)continue;
+   if(canHit(b,X,Y)){lock=true;break;}}
+  c.strokeStyle=col;c.lineWidth=lock?5:3;
+  if(lock){c.fillStyle=col+'22';c.beginPath();c.arc(X,Y,20,0,7);c.fill();}
+  c.beginPath();c.arc(X,Y,lock?20:16,0,7);c.stroke();
+  c.beginPath();c.moveTo(X-24,Y);c.lineTo(X-8,Y);c.moveTo(X+8,Y);c.lineTo(X+24,Y);
+  c.moveTo(X,Y-24);c.lineTo(X,Y-8);c.moveTo(X,Y+8);c.lineTo(X,Y+24);c.stroke();
+  c.fillStyle=col;c.beginPath();c.arc(X,Y,2.5,0,7);c.fill();
+  c.font='700 14px system-ui';c.fillStyle=col;c.fillText('P'+(+k+1),X+20,Y-18);
+  drawHold(k,X,Y,col);}
+ // muzzle flashes
+ for(let i=flashes.length-1;i>=0;i--){const f=flashes[i];const a=(now-f.t)/180;
+  if(a>=1){flashes.splice(i,1);continue;}
+  c.globalAlpha=1-a;c.strokeStyle=f.col;c.lineWidth=4;
+  c.beginPath();c.arc(f.x,f.y,16+30*a,0,7);c.stroke();c.globalAlpha=1;}
+
+ requestAnimationFrame(loop);}
+const HOLD_START=600,HOLD_BTN=500;
+function drawHold(k,X,Y,col){const hd=bhold[k];if(!hd)return;
+ const need=hd.kind==='start'?HOLD_START:HOLD_BTN;
+ const f=Math.min(1,(Date.now()-hd.t0)/need);
+ c.strokeStyle=col;c.lineWidth=5;
+ c.beginPath();c.arc(X,Y,26,-Math.PI/2,-Math.PI/2+f*2*Math.PI);c.stroke();
+ if(f>=1){const el=hd.el;for(const kk in bhold)delete bhold[kk];
+  if(el)el.click();else startGame();}}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fruit Slash — Little Blossoms</title>
+<style>
+ html,body{margin:0;height:100%;background:#fdf7ef;overflow:hidden;font-family:system-ui,sans-serif;
+           -webkit-user-select:none;user-select:none}
+ canvas.layer{position:fixed;inset:0;width:100vw;height:100vh}
+ #hud{position:fixed;top:12px;left:0;right:0;display:flex;justify-content:center;gap:14px;z-index:10}
+ .score{background:#fff;border:2px solid #e2d9cc;border-radius:14px;padding:6px 18px;
+        font-size:26px;font-weight:800;color:#6b5d54;min-width:110px;text-align:center}
+ .score small{display:block;font-size:12px;font-weight:600;color:#a89a8c}
+ #timer{position:fixed;top:16px;right:24px;color:#6b5d54;font-size:42px;font-weight:600;
+        font-variant-numeric:tabular-nums;z-index:10}
+ #status{position:fixed;top:16px;left:24px;color:#a99;font-size:13px;z-index:10}
+ #overlay{position:fixed;inset:0;background:#fdf7efee;display:flex;align-items:center;
+          justify-content:center;flex-direction:column;z-index:20;gap:14px;text-align:center}
+ #overlay img{max-height:22vh}
+ #overlay .msg{font-size:34px;color:#6b5d54;font-weight:800}
+ #overlay .sub{font-size:17px;color:#a89a8c}
+ #overlay .ranks{display:flex;gap:14px}
+ #overlay .rank{background:#fff;border:2px solid #e2d9cc;border-radius:14px;padding:12px 22px;
+        font-size:22px;font-weight:800;color:#6b5d54}
+ #overlay .rank small{display:block;font-size:13px;color:#a89a8c;font-weight:600}
+ #dock{position:fixed;bottom:0;left:0;right:0;display:flex;gap:6px;justify-content:center;
+       padding:8px;z-index:30}
+ #dock button{background:#fff;color:#6b5d54;border:1px solid #e2d9cc;border-radius:8px;
+              padding:7px 12px;font-size:13px;cursor:pointer}
+ #dock button.primary{background:#7fc79b;color:#274a35;border-color:#5cae7f;font-weight:700}
+ #dock button.danger{background:#f3d6a0;color:#6a4d1c;border-color:#e0b96a}
+ #curs{z-index:45;pointer-events:none}
+ .how{display:flex;flex-direction:column;gap:8px;background:#fff;border:2px solid #e2d9cc;
+      border-radius:16px;padding:16px 26px;font-size:20px;color:#6b5d54;text-align:left;font-weight:600}
+ .how b{color:#e0475f}
+ #tip{position:fixed;bottom:52px;left:0;right:0;text-align:center;color:#b3a596;
+      font-size:17px;font-weight:700;z-index:9;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="game" class="layer"></canvas>
+<canvas id="curs" class="layer"></canvas>
+<div id="hud"></div>
+<div id="tip">swipe through the fruit!</div>
+<div id="timer">1:15</div>
+<div id="dlabel" style="position:fixed;top:64px;right:24px;color:#a89a8c;font-size:16px;font-weight:700;z-index:10">Medium</div>
+<div id="status">connecting…</div>
+<div id="overlay">
+  <img src="logo.png" alt="">
+  <div class="msg">Fruit Slash</div>
+  <div class="how">
+    <div>&#128481; Your cursor <b>is</b> the blade &mdash; no buttons needed</div>
+    <div>&#127817; Swipe fast through fruit to slice &middot; several in one swipe = <b>combo!</b></div>
+    <div>&#128163; Don't cut the black bombs (&minus;15)</div>
+  </div>
+  <div class="ranks" id="ranks"></div>
+  <div class="sub" id="okey">hold <b>B</b> steady to start &middot; (S key works too &middot; H = menu)</div>
+</div>
+<div id="dock">
+  <button class="primary" onclick="startGame()">&#9654; Start (S)</button>
+  <span id="diffbtns"></span>
+  <button id="zbtn" onclick="toggleZones()">Own patch: OFF</button>
+  <button id="mbtn" onclick="toggleMute()">&#128266;</button>
+  <button class="danger" onclick="endGame()">&#9632; End (E)</button>
+  <button onclick="GG.goHome()">&#8962; Menu (H)</button>
+</div>
+<script src="common.js"></script>
+<script>
+const {PALETTE,connect,state,playersFromURL,diffFromURL,goHome,audio}=GG;
+const N=playersFromURL(2);
+const ROUND_S=75;
+/* ---------- difficulty ----------
+   gRel  : gravity as fraction of screen height per frame^2
+   apex  : [min,max] apex height as fraction of screen (higher = flies higher)
+   hang  : extra hang (lower gravity = slower fall)
+   size  : fruit size multiplier
+   want0 : fruits on screen at round start (ramps up during round)
+   bombCh: chance a lob is a bomb */
+const DIFFS={
+ easy:{label:'Easy', gRel:0.000090,apex:[0.62,0.80],size:1.30,want0:2,ramp:22,bombCh:0.05,minSwipe:4},
+ med: {label:'Medium',gRel:0.000125,apex:[0.55,0.75],size:1.00,want0:2,ramp:15,bombCh:0.10,minSwipe:6},
+ hard:{label:'Hard', gRel:0.000175,apex:[0.50,0.72],size:0.82,want0:3,ramp:11,bombCh:0.15,minSwipe:9}};
+let diff=diffFromURL('med'), D=DIFFS[diff];
+function setDiff(d){diff=d;D=DIFFS[d];updateDock();
+ document.getElementById('dlabel').textContent=N+'P \u00b7 '+D.label;}
+
+const cv=document.getElementById('game'),g=cv.getContext('2d');
+const cc=document.getElementById('curs'),c=cc.getContext('2d');
+let W,H;
+function fit(){W=innerWidth;H=innerHeight;
+ for(const [el,ctx] of [[cv,g],[cc,c]]){el.width=W*devicePixelRatio;el.height=H*devicePixelRatio;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);}}
+addEventListener('resize',fit);fit();
+
+/* ---------- state ---------- */
+let running=false,counting=false,tLeft=ROUND_S,timerIv=null;
+let zonesOn=false;
+const useZones=()=>zonesOn&&N>1;
+const zw=()=>W/N;
+const scores=Array(N).fill(0);
+const fruits=[],bits=[],pops=[];
+const trails={};           // player -> [[x,y,t],...]
+const comboT=Array(N).fill(0), comboN=Array(N).fill(0);
+
+/* fruit types drawn on canvas */
+const TYPES=[
+ {name:'melon', r:44,pts:10,skin:'#2aa876',flesh:'#e0475f',ch:.3},
+ {name:'orange',r:32,pts:15,skin:'#e8a020',flesh:'#f7c96b',ch:.3},
+ {name:'apple', r:28,pts:20,skin:'#e0475f',flesh:'#fdf3dd',ch:.25},
+ {name:'berry', r:20,pts:30,skin:'#8b5cf6',flesh:'#c9b6f2',ch:.15}];
+function pickType(){let x=Math.random(),a=0;
+ for(const t of TYPES){a+=t.ch;if(x<=a)return t;}return TYPES[0];}
+
+function lob(z){
+ const bomb=running&&Math.random()<D.bombCh;
+ const t=pickType();
+ let x,cx2;
+ if(useZones()){const zl=z*zw(),m=Math.min(60,zw()*0.18);
+  x=zl+m+Math.random()*(zw()-2*m);cx2=zl+zw()/2;}
+ else{x=W*0.15+Math.random()*W*0.7;cx2=W/2;z=-1;}
+ // aim for an apex between D.apex[0] and D.apex[1] of screen height:
+ // vy0 = sqrt(2 * g * apexHeight)  ->  guaranteed rise, gravity sets fall speed
+ const gpx=D.gRel*H;
+ const apex=(D.apex[0]+Math.random()*(D.apex[1]-D.apex[0]))*H;
+ const vy=-Math.sqrt(2*gpx*apex);
+ fruits.push({...(bomb?{name:'bomb',r:26,pts:-15,skin:'#3d3833',bomb:true}:t),
+  r:(bomb?26:t.r)*D.size,z,
+  x,y:H+40,vx:(cx2-x)*0.003+(Math.random()-.5)*(useZones()?0.9:1.6),
+  vy,rot:Math.random()*7,vr:(Math.random()-.5)*.10});}
+
+/* ---------- slicing ---------- */
+function segHit(x1,y1,x2,y2,cx2,cy2,r){
+ const dx=x2-x1,dy=y2-y1,L=dx*dx+dy*dy;
+ if(L===0)return Math.hypot(cx2-x1,cy2-y1)<r;
+ let u=((cx2-x1)*dx+(cy2-y1)*dy)/L;u=Math.max(0,Math.min(1,u));
+ return Math.hypot(cx2-(x1+u*dx),cy2-(y1+u*dy))<r;}
+function trySlice(pl,x1,y1,x2,y2){
+ if(!running)return;
+ const sp=Math.hypot(x2-x1,y2-y1);
+ if(sp<D.minSwipe)return;                          // must be a swipe, not a hover
+ const ang=Math.atan2(y2-y1,x2-x1);
+ for(let i=fruits.length-1;i>=0;i--){const f=fruits[i];
+  if(!segHit(x1,y1,x2,y2,f.x,f.y,f.r+6))continue;
+  fruits.splice(i,1);
+  if(f.bomb){scores[pl]=Math.max(0,scores[pl]+f.pts);updateHUD();
+   pops.push({x:f.x,y:f.y,txt:f.pts,t:Date.now(),col:'#3d3833'});
+   for(let j=0;j<16;j++)bits.push({x:f.x,y:f.y,vx:(Math.random()-.5)*9,
+    vy:(Math.random()-.5)*9,r:3,col:'#3d3833',juice:1,l:35});
+   audio.tone(85,.3,'sine',.22);audio.noise(.22,.12,0,220,'lowpass');continue;}
+  // combo
+  const now=Date.now();
+  if(now-comboT[pl]<340)comboN[pl]++;else comboN[pl]=1;
+  comboT[pl]=now;
+  const bonus=comboN[pl]>=2?comboN[pl]*5:0;
+  scores[pl]+=f.pts+bonus;updateHUD();
+  pops.push({x:f.x,y:f.y,txt:'+'+(f.pts+bonus)+(bonus?' combo!':''),
+   t:now,col:PALETTE[pl%4],big:!!bonus});
+  for(const s of[-1,1])bits.push({x:f.x,y:f.y,
+   vx:f.vx+Math.cos(ang+Math.PI/2)*s*3.4,vy:f.vy+Math.sin(ang+Math.PI/2)*s*3.4-1,
+   r:f.r,skin:f.skin,flesh:f.flesh,half:s,rot:ang,vr:s*.14,l:60});
+  for(let j=0;j<10;j++)bits.push({x:f.x,y:f.y,vx:(Math.random()-.5)*6,
+   vy:-Math.random()*4,r:2+Math.random()*2,col:f.flesh||f.skin,juice:1,l:40});
+  audio.noise(.07,.09,0,900);audio.tone(560+comboN[pl]*90,.1,'triangle',.12,.02);}}
+function beep(f){try{const a=beep.ctx||(beep.ctx=new AudioContext());
+ const o=a.createOscillator(),gn=a.createGain();
+ o.frequency.value=f;o.type='triangle';gn.gain.setValueAtTime(.12,a.currentTime);
+ gn.gain.exponentialRampToValueAtTime(.001,a.currentTime+.15);
+ o.connect(gn).connect(a.destination);o.start();o.stop(a.currentTime+.17);}catch(e){}}
+
+/* ---------- HUD / rounds ---------- */
+const hud=document.getElementById('hud');
+function updateHUD(){hud.innerHTML='';
+ for(let i=0;i<N;i++){const d=document.createElement('div');d.className='score';
+  d.style.borderColor=PALETTE[i%4];d.style.color=PALETTE[i%4];
+  d.innerHTML='<small>P'+(i+1)+'</small>'+scores[i];hud.appendChild(d);}}
+updateHUD();
+const overlay=document.getElementById('overlay'),ranks=document.getElementById('ranks'),
+      timerEl=document.getElementById('timer'),okey=document.getElementById('okey');
+function fmt(t){return Math.floor(Math.max(t,0)/60)+':'+String(Math.max(t,0)%60).padStart(2,'0');}
+const countEl=document.createElement('div');
+countEl.style.cssText='position:fixed;inset:0;display:none;align-items:center;justify-content:center;'+
+ 'font:900 18vh system-ui;color:#6b5d54;z-index:22;pointer-events:none';
+document.body.appendChild(countEl);
+function startGame(){if(running||counting)return;
+ counting=true;scores.fill(0);comboN.fill(0);updateHUD();
+ fruits.length=0;bits.length=0;pops.length=0;
+ overlay.style.display='none';tLeft=ROUND_S;timerEl.textContent=fmt(tLeft);
+ let n=3;countEl.style.display='flex';countEl.textContent=n;audio.tick(false);
+ const cd=setInterval(()=>{n--;
+  if(n>0){countEl.textContent=n;audio.tick(false);}
+  else{clearInterval(cd);countEl.textContent='GO!';audio.tick(true);audio.jingle();
+   audio.music('fruit');
+   setTimeout(()=>countEl.style.display='none',600);
+   counting=false;running=true;
+   clearInterval(timerIv);
+   timerIv=setInterval(()=>{tLeft--;timerEl.textContent=fmt(tLeft);
+    if(tLeft<=0)endGame();},1000);}},550);}
+function endGame(){if(!running&&overlay.style.display!=='none')return;
+ running=false;clearInterval(timerIv);
+ audio.stopMusic();audio.fanfare();
+ const order=[...Array(N).keys()].sort((a,b)=>scores[b]-scores[a]);
+ ranks.innerHTML='';const medals=['\uD83E\uDD47','\uD83E\uDD48','\uD83E\uDD49',''];
+ order.forEach((p,i)=>{const d=document.createElement('div');d.className='rank';
+  d.style.borderColor=PALETTE[p%4];
+  d.innerHTML='<small>'+(medals[i]||'')+' P'+(p+1)+'</small>'+scores[p]+' pts';
+  ranks.appendChild(d);});
+ document.querySelector('#overlay .msg').textContent='Round over!';
+ okey.innerHTML='hold <b>B</b> to play again \u00b7 H = menu';
+ overlay.style.display='flex';}
+function updateDock(){const box=document.getElementById('diffbtns');box.innerHTML='';
+ for(const d in DIFFS){const b=document.createElement('button');
+  b.textContent=DIFFS[d].label;
+  if(d===diff){b.style.background='#f2b6c6';b.style.borderColor='#e79ab0';b.style.color='#5a3d47';}
+  b.onclick=()=>setDiff(d);box.appendChild(b);}}
+updateDock();setDiff(diff);
+function toggleZones(){zonesOn=!zonesOn;
+ document.getElementById('zbtn').textContent='Own patch: '+(zonesOn?'ON':'OFF');}
+function toggleMute(){audio.setMuted(!audio.muted);
+ document.getElementById('mbtn').innerHTML=audio.muted?'&#128263;':'&#128266;';}
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();
+ if(k==='m')toggleMute();
+ else if(k==='g'){const ks=Object.keys(DIFFS);setDiff(ks[(ks.indexOf(diff)+1)%ks.length]);}
+ else if(k==='s')startGame();
+ else if(k==='e')endGame();
+ else if(k==='r'){running=false;clearInterval(timerIv);location.reload();}
+ else if(k==='h')goHome();});
+
+/* ---------- input: every player's cursor is a blade, no button needed ---------- */
+const bhold={};
+function pressAt(pl,x,y){
+ const px=x*innerWidth,py=y*innerHeight;
+ const el=document.elementFromPoint(px,py);
+ if(el&&el.tagName==='BUTTON'){bhold[pl]={t0:Date.now(),el,kind:'btn'};return true;}
+ if(overlay.style.display!=='none'){bhold[pl]={t0:Date.now(),kind:'start'};return true;}
+ return false;}
+connect({players:N,smooth:false,status:document.getElementById('status'),
+ onB:(pl,x,y)=>{if(!pressAt(pl,x,y)){}},
+ onBUp:pl=>{delete bhold[pl];},
+ onHome:()=>goHome()});
+
+/* ---------- draw fruit ---------- */
+function drawFruit(f){g.save();g.translate(f.x,f.y);g.rotate(f.rot);
+ if(f.bomb){g.fillStyle='#3d3833';
+  g.beginPath();g.arc(0,0,f.r,0,7);g.fill();
+  g.strokeStyle='#6b5d54';g.lineWidth=4;
+  g.beginPath();g.moveTo(0,-f.r);g.quadraticCurveTo(8,-f.r-10,14,-f.r-8);g.stroke();
+  const sp=Date.now()/90;
+  g.fillStyle='#e8a020';
+  g.beginPath();g.arc(14+Math.cos(sp)*3,-f.r-8+Math.sin(sp)*3,4,0,7);g.fill();
+  g.fillStyle='#fff2';g.beginPath();g.arc(-f.r*.3,-f.r*.3,f.r*.35,0,7);g.fill();}
+ else{g.fillStyle=f.skin;
+  g.beginPath();g.arc(0,0,f.r,0,7);g.fill();
+  if(f.name==='melon'){g.strokeStyle='#1e7a58';g.lineWidth=5;
+   for(const a of[-.7,0,.7]){g.beginPath();g.arc(0,0,f.r-4,a-0.35+1.5,a+0.35+1.5);g.stroke();}}
+  if(f.name==='orange'){g.fillStyle='#fdf3dd';g.beginPath();g.arc(-f.r*.3,-f.r*.35,f.r*.22,0,7);g.fill();}
+  if(f.name==='apple'||f.name==='berry'){g.fillStyle='#5a8f4a';
+   g.save();g.rotate(-.3);g.fillRect(-2.5,-f.r-9,5,10);
+   g.beginPath();g.ellipse(7,-f.r-7,7,3.5,.6,0,7);g.restore();g.fill();}
+  g.fillStyle='#ffffff33';g.beginPath();g.arc(-f.r*.3,-f.r*.3,f.r*.4,0,7);g.fill();}
+ g.restore();}
+
+/* ---------- main loop ---------- */
+function loop(t){
+ g.clearRect(0,0,W,H);
+ g.fillStyle='#fdf7ef';g.fillRect(0,0,W,H);
+ g.fillStyle='#f6ecdd';
+ for(const [fx,fy,r] of [[.1,.85,90],[.9,.9,120],[.5,.95,100]]){
+  g.beginPath();g.arc(fx*W,fy*H+40,r,Math.PI,0);g.fill();}   // soft hills
+ if(useZones()){g.setLineDash([10,12]);g.lineWidth=2;
+  for(let i=1;i<N;i++){g.strokeStyle='rgba(110,100,90,.3)';
+   g.beginPath();g.moveTo(i*zw(),90);g.lineTo(i*zw(),H-60);g.stroke();}
+  g.setLineDash([]);
+  g.globalAlpha=.55;g.font='800 20px system-ui';g.textAlign='left';
+  for(let i=0;i<N;i++){g.fillStyle=PALETTE[i%4];
+   g.fillText('P'+(i+1),i*zw()+14,H-70);}
+  g.globalAlpha=1;}
+
+ if(running){
+  if(useZones()){
+   const perZone=Math.max(1,Math.ceil((D.want0+Math.floor((ROUND_S-tLeft)/D.ramp))/1.6));
+   for(let z=0;z<N;z++){const cnt=fruits.filter(f=>f.z===z).length;
+    if(cnt<perZone&&Math.random()<.06)lob(z);}}
+  else{
+   const want=D.want0+Math.floor((ROUND_S-tLeft)/D.ramp);
+   if(fruits.length<want&&Math.random()<.06)lob(Math.floor(Math.random()*N));}
+  for(let i=fruits.length-1;i>=0;i--){const f=fruits[i];
+   f.x+=f.vx;f.y+=f.vy;f.vy+=D.gRel*H;f.rot+=f.vr;
+   if(f.y>H+70)fruits.splice(i,1);}}
+ for(const f of fruits)drawFruit(f);
+
+ // halves + juice
+ for(let i=bits.length-1;i>=0;i--){const b=bits[i];
+  b.x+=b.vx;b.y+=b.vy;b.vy+=.22;b.l--;if(b.vr)b.rot+=b.vr;
+  g.globalAlpha=Math.max(0,b.l/60);
+  if(b.juice){g.fillStyle=b.col;g.beginPath();g.arc(b.x,b.y,b.r,0,7);g.fill();}
+  else{g.save();g.translate(b.x,b.y);g.rotate(b.rot);
+   g.fillStyle=b.flesh;g.beginPath();
+   g.arc(0,0,b.r,b.half>0?0:Math.PI,b.half>0?Math.PI:2*Math.PI);g.fill();
+   g.fillStyle=b.skin;g.beginPath();
+   g.arc(0,0,b.r,b.half>0?0:Math.PI,b.half>0?Math.PI:2*Math.PI);
+   g.arc(0,0,b.r*.82,b.half>0?Math.PI:2*Math.PI,b.half>0?0:Math.PI,true);g.fill();
+   g.restore();}
+  g.globalAlpha=1;if(b.l<=0)bits.splice(i,1);}
+
+ // popups
+ const now=Date.now();
+ for(let i=pops.length-1;i>=0;i--){const p2=pops[i];const a=(now-p2.t)/900;
+  if(a>=1){pops.splice(i,1);continue;}
+  g.globalAlpha=1-a;g.fillStyle=p2.col;
+  g.font=(p2.big?'900 42px':'800 30px')+' system-ui';g.textAlign='center';
+  g.fillText(p2.txt,p2.x,p2.y-40*a);g.globalAlpha=1;}
+
+ // blades: trail per player + slicing off cursor motion
+ c.clearRect(0,0,W,H);
+ for(const k in state){const s=state[k];if(!s)continue;
+  const tr=trails[k]||(trails[k]=[]);
+  if(s.visible){const X=s.x*W,Y=s.y*H;
+   const lastP=tr[tr.length-1];
+   tr.push([X,Y,now]);
+   if(lastP)trySlice(+k,lastP[0],lastP[1],X,Y);}
+  while(tr.length&&now-tr[0][2]>160)tr.shift();
+  if(tr.length>10)tr.shift();
+  const col=PALETTE[k%4];
+  c.lineCap='round';c.strokeStyle=col;
+  for(let i=1;i<tr.length;i++){
+   const seg=Math.hypot(tr[i][0]-tr[i-1][0],tr[i][1]-tr[i-1][1]);
+   if(seg<3)continue;                       // don't render hover jitter as blade
+   c.lineWidth=i*1.1;c.globalAlpha=i/tr.length*.9;
+   c.beginPath();c.moveTo(tr[i-1][0],tr[i-1][1]);c.lineTo(tr[i][0],tr[i][1]);c.stroke();}
+  c.globalAlpha=1;
+  if(s.visible){const X=s.x*W,Y=s.y*H;
+   c.fillStyle=col;c.beginPath();c.arc(X,Y,5,0,7);c.fill();
+   c.strokeStyle=col;c.lineWidth=2;c.beginPath();c.arc(X,Y,11,0,7);c.stroke();
+   c.font='700 14px system-ui';c.fillStyle=col;c.fillText('P'+(+k+1),X+18,Y-16);
+   drawHold(k,X,Y,col);}}
+
+ requestAnimationFrame(loop);}
+const HOLD_START=600,HOLD_BTN=500;
+function drawHold(k,X,Y,col){const hd=bhold[k];if(!hd)return;
+ const need=hd.kind==='start'?HOLD_START:HOLD_BTN;
+ const f=Math.min(1,(Date.now()-hd.t0)/need);
+ c.strokeStyle=col;c.lineWidth=5;
+ c.beginPath();c.arc(X,Y,26,-Math.PI/2,-Math.PI/2+f*2*Math.PI);c.stroke();
+ if(f>=1){const el=hd.el;for(const kk in bhold)delete bhold[kk];
+  if(el)el.click();else startGame();}}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
